@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PharmaChain Local Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-css-reset/dist/reset.min.css">
+  <style>
+    body { font-family: Inter, Roboto, Arial; background: #f3f4f6; color: #0f172a; padding: 20px; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 16px; }
+    .card { background:white; border-radius:12px; padding:12px; box-shadow: 0 4px 14px rgba(2,6,23,0.06); }
+    .grid { display:grid; grid-template-columns: 320px 1fr 360px; gap:12px; }
+    .shipment-item { padding:10px; border-radius:8px; cursor:pointer; }
+    .shipment-item.active { background: linear-gradient(90deg,#eef2ff,#fff); border:1px solid #6366f1; }
+    .small { font-size:12px; color:#64748b; }
+    #map { height:240px; border-radius:8px; }
+    .chart-wrap { height:200px; }
+    pre { font-size:11px; overflow:auto; max-height:220px; }
+  </style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1 style="margin:0">PharmaChain — Local Dashboard</h1>
+        <div class="small">Simulated blockchain ledger · local server</div>
+      </div>
+      <div>
+        <button id="btnStart" class="card">Start Simulator</button>
+        <button id="btnStop" class="card">Stop Simulator</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Shipments</h3>
+        <div id="shipmentsList" style="margin-top:8px;"></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <h3 id="selTitle">Select a shipment</h3>
+            <div class="small" id="selMeta"></div>
+          </div>
+          <div class="small" id="lastTs"></div>
+        </div>
+
+        <div id="map" style="margin-top:8px"></div>
+
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <div class="card" style="flex:1;">
+            <div class="small">Temperature (°C)</div>
+            <div id="tempVal" style="font-size:22px;font-weight:600">--</div>
+          </div>
+          <div class="card" style="flex:1;">
+            <div class="small">Humidity (%)</div>
+            <div id="humVal" style="font-size:22px;font-weight:600">--</div>
+          </div>
+          <div class="card" style="flex:1;">
+            <div class="small">Pressure (hPa)</div>
+            <div id="presVal" style="font-size:22px;font-weight:600">--</div>
+          </div>
+        </div>
+
+        <div class="chart-wrap card" style="margin-top:8px;">
+          <canvas id="chartTemp"></canvas>
+        </div>
+
+      </div>
+
+      <div class="card">
+        <h3>Ledger (recent)</h3>
+        <div id="ledger" style="margin-top:8px;"></div>
+
+        <h4 style="margin-top:12px">Latest Alerts</h4>
+        <pre id="alerts">No alerts yet</pre>
+      </div>
+    </div>
+
+    <footer style="margin-top:12px; text-align:center;" class="small">
+      Local demo — no external blockchain. Ledger is a local append-only file.
+    </footer>
+  </div>
+
+<script>
+let selectedShipment = null;
+let map, marker;
+let chart;
+
+async function init(){
+  map = L.map('map').setView([12.9716,77.5946], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+  marker = L.marker([12.9716,77.5946]).addTo(map);
+
+  const ctx = document.getElementById('chartTemp').getContext('2d');
+  chart = new Chart(ctx, { type:'line', data:{labels:[], datasets:[{label:'Temp (°C)', data:[], borderColor:'#ef4444', tension:0.3}]}, options:{responsive:true, maintainAspectRatio:false} });
+
+  await refreshAll();
+  setInterval(refreshAll, 3000);
+}
+
+async function refreshAll(){
+  await loadShipments();
+  await loadLedger();
+  if(selectedShipment) await loadTelemetry(selectedShipment);
+}
+
+async function loadShipments(){
+  const res = await fetch('/api/shipments');
+  const j = await res.json();
+  const list = document.getElementById('shipmentsList');
+  list.innerHTML = '';
+  j.shipments.forEach(s=>{
+    const div = document.createElement('div');
+    div.className='shipment-item';
+    div.innerHTML = `<div style="display:flex;justify-content:space-between"><div><strong>${s.shipment_id}</strong><div class="small">${s.batch_id}</div></div><div class="small">${s.status}</div></div>`;
+    div.onclick = ()=>{
+      document.querySelectorAll('.shipment-item').forEach(x=>x.classList.remove('active'));
+      div.classList.add('active');
+      selectedShipment = s.shipment_id;
+      document.getElementById('selTitle').innerText = s.shipment_id;
+      document.getElementById('selMeta').innerText = 'Batch: '+s.batch_id + ' • created: '+s.created_at;
+      loadTelemetry(s.shipment_id);
+    };
+    list.appendChild(div);
+  });
+  if(!selectedShipment && j.shipments.length) {
+    selectedShipment = j.shipments[0].shipment_id;
+    document.querySelector('.shipment-item').classList.add('active');
+    document.getElementById('selTitle').innerText = j.shipments[0].shipment_id;
+    document.getElementById('selMeta').innerText = 'Batch: '+j.shipments[0].batch_id;
+    loadTelemetry(selectedShipment);
+  }
+}
+
+async function loadTelemetry(sid){
+  const res = await fetch('/api/telemetry/'+sid+'?limit=50');
+  const j = await res.json();
+  const data = j.data || [];
+  if(data.length){
+    const last = data[data.length-1];
+    document.getElementById('tempVal').innerText = last.temp;
+    document.getElementById('humVal').innerText = last.humidity;
+    document.getElementById('presVal').innerText = last.pressure;
+    document.getElementById('lastTs').innerText = new Date(last.ts).toLocaleString();
+    marker.setLatLng([last.lat,last.lon]);
+    map.setView([last.lat,last.lon], 12, {animate:true});
+    chart.data.labels = data.map(d=>new Date(d.ts).toLocaleTimeString());
+    chart.data.datasets[0].data = data.map(d=>d.temp);
+    chart.update();
+    const alerts = data.filter(d=>d.tamper || d.temp<2 || d.temp>30).map(a=>`${a.ts} - temp:${a.temp} tamper:${a.tamper}`);
+    document.getElementById('alerts').innerText = alerts.length? alerts.join('\\n') : 'No alerts';
+  }
+}
+
+async function loadLedger(){
+  const res = await fetch('/api/ledger?limit=20');
+  const j = await res.json();
+  const el = document.getElementById('ledger');
+  el.innerHTML = '';
+  (j.chain || []).slice().reverse().forEach(b=>{
+    const d = b.data;
+    const div = document.createElement('div');
+    div.style.marginBottom='8px';
+    div.innerHTML = `<div class="small"><strong>${d.event}</strong> • ${new Date(b.timestamp*1000).toLocaleString()}</div><div style="font-size:12px">${JSON.stringify(d.payload)}</div>`;
+    el.appendChild(div);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', ()=> {
+  init();
+  document.getElementById('btnStart').onclick = async ()=>{
+    const res = await fetch('/api/simulate/start', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({shipment_count:4, interval_sec:2.0})
+    });
+    const j = await res.json();
+
+    
+    alert('Simulator started');
+  };
+  document.getElementById('btnStop').onclick = async ()=>{
+    await fetch('/api/simulate/stop', {method:'POST'});
+    alert('Simulator stopped');
+  };
+});
+</script>
+</body>
+</html>
